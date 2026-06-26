@@ -11,7 +11,9 @@ Two paths were available:
 - **Regression** → predict a *risk score* (a number) that officers use as a guide
 - **Classification** → predict *approve or reject* directly (0 or 1)
 
-**We chose classification** because the target column `LoanApproved` is already binary (0 or 1), and the business wants a direct decision, not just a score.
+**Both approaches are implemented** because they serve different business needs:
+- Classification → bulk auto-decisions (approve/reject at scale)
+- Regression → graded risk signal for borderline cases that go to human review
 
 ---
 
@@ -206,6 +208,87 @@ These match what credit risk theory would predict — the model is learning real
 
 ---
 
+---
+
+## Approach 2: Regression — Predicting Risk Score
+
+### Why add regression?
+
+The challenge asks for a model that either predicts a **risk score** (regression) or **loan approval** (classification). The notebook now covers both.
+
+The regression model predicts `RiskScore`, a continuous number where:
+- **Low score** (e.g. 30) → low risk → likely a safe borrower
+- **High score** (e.g. 80) → high risk → likely to default
+
+This is useful for borderline applicants — instead of a hard yes/no, a loan officer sees "this applicant scores 58/100" and can make a more nuanced judgment.
+
+### What changes from classification?
+
+**Target column changes to `RiskScore`.**  
+`RiskScore` must be removed from features too (it cannot predict itself).
+
+```python
+X_reg = data.drop(columns=['LoanApproved', 'RiskScore'])
+y_reg = data['RiskScore']
+```
+
+**A new `numerical_cols_reg` list is defined** that excludes `RiskScore`:
+```python
+numerical_cols_reg = [c for c in data.columns
+    if c not in ordinal_cols + categorical_cols + income_col + ['LoanApproved', 'RiskScore']
+    and data[c].dtype != object]
+```
+
+**All sub-pipelines (`numerical_pipe`, `ordinal_pipe`, `categorical_pipe`, `income_pipe`) are reused as-is** — only the `ColumnTransformer` is rebuilt with the new feature list.
+
+### Why 3-fold CV instead of 5-fold?
+
+Classification used `StratifiedKFold(n_splits=5)` because it needed to preserve the 76/24 class ratio in every fold.
+
+Regression has a continuous target — there is no class ratio to preserve. Regular 3-fold CV is sufficient and faster.
+
+### Models compared
+
+| Model | What it does |
+|---|---|
+| **Linear Regression** | Fits a straight line through the feature space to the risk score. Fast, interpretable. |
+| **Random Forest Regressor** | An ensemble of decision trees that each predict a number; the final prediction is their average. Captures non-linear relationships. |
+
+### CV results (from the notebook)
+
+| Model | CV R² | CV RMSE |
+|---|---|---|
+| Linear Regression | 0.79 | 3.58 |
+| Random Forest | 0.87 | 2.75 |
+
+**R² = 0.87** means the Random Forest explains 87% of the variance in risk scores.  
+**RMSE = 2.75** means on average the predicted score is off by ~2.75 points on a scale of 29–84.
+
+### GridSearchCV for regression
+
+Same concept as classification — tune `n_estimators`, `max_depth`, `min_samples_leaf` to find the best combination.  
+A smaller grid (8 combinations × 3 folds = 24 fits) is used because Random Forest regression is computationally expensive on 16,000 rows.
+
+### Evaluation visualisations
+
+**Scatter plot — Predicted vs Actual Risk Score**  
+Points cluster tightly around the red diagonal (perfect prediction line).  
+Scatter away from the line = prediction error.  
+A well-fitted model has points hugging the diagonal with no obvious pattern in the residuals.
+
+**Feature importance — Risk Score**  
+Same interpretation as classification: shows which features the forest relied on most to predict the score.
+
+### Regression metrics explained
+
+| Metric | Formula (simplified) | What it means |
+|---|---|---|
+| **R²** | 1 − (model error / baseline error) | Proportion of variance explained. 1.0 = perfect; 0 = no better than predicting the mean |
+| **RMSE** | √mean(errors²) | Average error in the same units as RiskScore. Penalises large errors heavily. |
+| **MAE** | mean(|errors|) | Average absolute error. More robust to outliers than RMSE. |
+
+---
+
 ## Key concepts to remember
 
 | Concept | One-line explanation |
@@ -222,6 +305,10 @@ These match what credit risk theory would predict — the model is learning real
 | **OrdinalEncoder** | Encodes categories that have a natural order (e.g. education level). |
 | **OneHotEncoder** | Encodes categories with no order — creates one binary column per category. |
 | **Custom Transformer** | A class inheriting `BaseEstimator` + `TransformerMixin` that plugs into any sklearn pipeline. |
+| **R²** | How much of the target's variance the model explains. 1.0 = perfect; 0 = no better than predicting the mean. |
+| **RMSE** | Root Mean Squared Error — average prediction error in the same units as the target. Sensitive to large errors. |
+| **MAE** | Mean Absolute Error — average absolute error. More robust to outliers than RMSE. |
+| **Regression vs Classification** | Regression predicts a number (continuous); classification predicts a category (discrete). Different targets, same pipeline structure. |
 
 ---
 
@@ -237,5 +324,13 @@ ROC-AUC of 0.9994 is unusually high, which suggests the dataset may be synthetic
 A model trained on historical decisions inherits any bias those decisions contained. Before deployment, check approval rates across age, marital status, and employment type to satisfy fair lending regulations.
 
 **Threshold is a business decision**  
-The model outputs a probability (0–1). The default decision boundary is 0.50.  
-Raising it to 0.65 means fewer approvals but fewer defaults — a risk-appetite choice for management, not a modeling choice.
+The classifier outputs a probability (0–1). The default decision boundary is 0.50.  
+Raising it to 0.65 means fewer approvals but fewer defaults — a risk-appetite choice for management, not a modelling choice.
+
+**Using both models together**  
+A practical deployment pattern:
+1. Run the classifier first — auto-approve high-confidence (prob > 0.80) and auto-reject low-confidence (prob < 0.20)
+2. For the borderline band (0.20–0.80), pass the application to a loan officer with the **regression risk score** as additional context
+3. The officer sees both the probability and the score and makes the final call
+
+This way the classifier handles volume and the regressor adds nuance where it matters most.
